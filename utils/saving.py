@@ -20,3 +20,12 @@ def best_saving(working_dir, epoch, model, fusion_model, optimizer):
         'fusion_model_state_dict': fusion_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
     }, best_name)  # just change to your preferred folder/filename
+
+def best_ap_saving(working_dir, epoch, model, fusion_model, optimizer):
+    ap_name = '{}/model_best_ap.pt'.format(working_dir)
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'fusion_model_state_dict': fusion_model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, ap_name)  # checkpoint for best average precision

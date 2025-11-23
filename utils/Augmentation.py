@@ -3,7 +3,7 @@
 # Mengmeng Wang, Jiazheng Xing, Yong Liu
 
 from datasets.transforms_ss import *
-from RandAugment import RandAugment
+from torchvision.transforms import RandAugment
 
 class GroupTransform(object):
     def __init__(self, transform):

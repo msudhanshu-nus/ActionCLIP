@@ -18,7 +18,6 @@ import cv2
 import numbers
 import math
 import torch
-from RandAugment import RandAugment
 
 class GroupTransform(object):
     def __init__(self, transform):
@@ -76,12 +75,63 @@ class VideoRecord(object):
     def label(self):
         return int(self._data[2])
 
+class MultiLabelVideoRecord(object):
+    """
+    For lines like:
+    <path> <num_frames> <y_bleed> <y_mech> <y_therm>
+    e.g.
+    MultiBypass_frames/BBP01_clip01  80  1 0 0
+    """
+
+    def __init__(self, row):
+        # row is a list of strings from x.strip().split()
+        self._data = row
+
+    @property
+    def path(self):
+        return self._data[0]
+
+    @property
+    def num_frames(self):
+        return int(self._data[1])
+
+    @property
+    def label(self):
+        # Use the first 3 flags: bleeding, mechanical, thermal. Strip bracket wrappers like "[0]".
+        tokens = self._data[2:5]
+        if len(tokens) != 3:
+            raise ValueError(f"Expected 3 label tokens, got {len(tokens)} from row: {self._data}")
+
+        labels = []
+        for token in tokens:
+            cleaned = token.strip().strip("[]")
+            try:
+                labels.append(float(cleaned))
+            except ValueError:
+                raise ValueError(f"Could not parse label token '{token}' from row: {self._data}")
+        return np.array(labels, dtype=np.float32)
+
+    @property
+    def severity(self):
+        # Severity levels for bleeding, mechanical, thermal (tokens 5,6,7 in the txt row).
+        tokens = self._data[5:8]
+        if len(tokens) != 3:
+            raise ValueError(f"Expected 3 severity tokens, got {len(tokens)} from row: {self._data}")
+
+        levels = []
+        for token in tokens:
+            cleaned = token.strip().strip("[]")
+            try:
+                levels.append(int(cleaned))
+            except ValueError:
+                raise ValueError(f"Could not parse severity token '{token}' from row: {self._data}")
+        return np.array(levels, dtype=np.int64)
 
 class Action_DATASETS(data.Dataset):
     def __init__(self, list_file, labels_file,
                  num_segments=1, new_length=1,
-                 image_tmpl='img_{:05d}.jpg', transform=None,
-                 random_shift=True, test_mode=False, index_bias=1):
+                 image_tmpl='img_{:08d}.jpg', transform=None,
+                 random_shift=True, test_mode=False, index_bias=1, include_severity=False):
 
         self.list_file = list_file
         self.num_segments = num_segments
@@ -93,6 +143,8 @@ class Action_DATASETS(data.Dataset):
         self.loop=False
         self.index_bias = index_bias
         self.labels_file = labels_file
+        self.include_severity = include_severity
+        self.frame_cache = {}  # directory -> sorted list of frame filenames
 
         if self.index_bias is None:
             if self.image_tmpl == "frame{:d}.jpg":
@@ -102,9 +154,29 @@ class Action_DATASETS(data.Dataset):
         self._parse_list()
         self.initialized = False
 
-    def _load_image(self, directory, idx):
+    def _get_frame_list(self, directory):
+        """Return a cached, lexicographically sorted list of frame filenames in a directory."""
+        if directory not in self.frame_cache:
+            files = [
+                f for f in os.listdir(directory)
+                if f.lower().endswith(".jpg") or f.lower().endswith(".png")
+            ]
+            files.sort()
+            if len(files) == 0:
+                raise FileNotFoundError(f"No image frames found in directory: {directory}")
+            self.frame_cache[directory] = files
+        return self.frame_cache[directory]
 
-        return [Image.open(os.path.join(directory, self.image_tmpl.format(idx))).convert('RGB')]
+    def _load_image(self, directory, idx):
+        """
+        Load image by indexing into the sorted frame list for the directory.
+        idx is biased by self.index_bias (default 1), so convert to 0-based before lookup.
+        """
+        frame_list = self._get_frame_list(directory)
+        zero_based = idx - self.index_bias
+        zero_based = max(0, min(zero_based, len(frame_list) - 1))
+        fname = frame_list[zero_based]
+        return [Image.open(os.path.join(directory, fname)).convert('RGB')]
     @property
     def total_length(self):
         return self.num_segments * self.seg_length
@@ -115,7 +187,12 @@ class Action_DATASETS(data.Dataset):
         return classes_all.values.tolist()
     
     def _parse_list(self):
-        self.video_list = [VideoRecord(x.strip().split(' ')) for x in open(self.list_file)]
+        with open(self.list_file, "r") as handle:
+            self.video_list = [
+                MultiLabelVideoRecord(line.strip().split())
+                for line in handle
+                if line.strip()
+            ]
 
     def _sample_indices(self, record):
         if record.num_frames <= self.total_length:
@@ -142,17 +219,17 @@ class Action_DATASETS(data.Dataset):
 
     def _get_val_indices(self, record):
         if self.num_segments == 1:
-            return np.array([record.num_frames //2], dtype=np.int) + self.index_bias
+            return np.array([record.num_frames //2], dtype=np.int64) + self.index_bias
         
         if record.num_frames <= self.total_length:
             if self.loop:
                 return np.mod(np.arange(self.total_length), record.num_frames) + self.index_bias
             return np.array([i * record.num_frames // self.total_length
-                             for i in range(self.total_length)], dtype=np.int) + self.index_bias
+                             for i in range(self.total_length)], dtype=np.int64) + self.index_bias
         offset = (record.num_frames / self.num_segments - self.seg_length) / 2.0
         return np.array([i * record.num_frames / self.num_segments + offset + j
                          for i in range(self.num_segments)
-                         for j in range(self.seg_length)], dtype=np.int) + self.index_bias
+                         for j in range(self.seg_length)], dtype=np.int64) + self.index_bias
 
     def __getitem__(self, index):
         record = self.video_list[index]
@@ -175,7 +252,11 @@ class Action_DATASETS(data.Dataset):
                 raise
             images.extend(seg_imgs)
         process_data = self.transform(images)
-        return process_data, record.label
+        target = torch.from_numpy(record.label)
+        if self.include_severity:
+            severity = torch.from_numpy(record.severity)
+            return process_data, target, severity
+        return process_data, target
 
     def __len__(self):
         return len(self.video_list)

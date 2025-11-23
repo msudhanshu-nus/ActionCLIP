@@ -15,11 +15,12 @@ from pathlib import Path
 import yaml
 from dotmap import DotMap
 import pprint
-import numpy
 from modules.Visual_Prompt import visual_prompt
 from utils.Augmentation import get_augmentation
 import torch
 from utils.Text_Prompt import *
+import numpy as np
+from sklearn.metrics import f1_score, average_precision_score
 
 class TextCLIP(nn.Module):
     def __init__(self, model):
@@ -37,42 +38,142 @@ class ImageCLIP(nn.Module):
     def forward(self, image):
         return self.model.encode_image(image)
 
-def validate(epoch, val_loader, classes, device, model, fusion_model, config, num_text_aug):
+def validate(epoch, val_loader, classes, device, model, fusion_model, config, num_text_aug, text_features=None, threshold=0.5):
+    """Multi-label validation with sigmoid probabilities and macro F1."""
     model.eval()
     fusion_model.eval()
-    num = 0
-    corr_1 = 0
-    corr_5 = 0
+
+    # Allow scalar or per-class thresholds
+    def get_threshold_tensor(thresh_value, num_classes, device):
+        if isinstance(thresh_value, (list, tuple, np.ndarray)):
+            t = torch.tensor(thresh_value, device=device, dtype=torch.float32)
+            if t.numel() != num_classes:
+                raise ValueError(f"Threshold length {t.numel()} does not match num_classes {num_classes}")
+            return t
+        return torch.tensor(thresh_value, device=device, dtype=torch.float32).expand(num_classes)
+
+    severity_weights =  [0.02, 0.06, 0.12, 0.19, 0.26, 0.33]
+    num_severity_levels = 6
 
     with torch.no_grad():
-        text_inputs = classes.to(device)
-        text_features = model.encode_text(text_inputs)
-        for iii, (image, class_id) in enumerate(tqdm(val_loader)):
+        if text_features is None:
+            text_inputs = classes.to(device)
+            raw_text_features = model.encode_text(text_inputs)
+            text_features = raw_text_features.view(num_text_aug, -1, raw_text_features.size(-1)).mean(dim=0)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        num_classes = text_features.size(0)
+        thresh_tensor = get_threshold_tensor(threshold, num_classes, device)
+
+        all_targets = []
+        all_preds = []
+        all_probs = []
+        all_severities = []
+
+        for batch in tqdm(val_loader):
+            if len(batch) == 3:
+                image, targets, severities = batch
+            else:
+                image, targets = batch
+                severities = None
             image = image.view((-1, config.data.num_segments, 3) + image.size()[-2:])
             b, t, c, h, w = image.size()
-            class_id = class_id.to(device)
+            targets = targets.to(device).float()
+            if targets.dim() == 1:
+                targets = targets.unsqueeze(1)
+            targets = targets[:, :num_classes]
+            if severities is not None:
+                severities = severities.to(device)
+                if severities.dim() == 1:
+                    severities = severities.unsqueeze(1)
+                severities = severities[:, :num_classes]
+
             image_input = image.to(device).view(-1, c, h, w)
             image_features = model.encode_image(image_input).view(b, t, -1)
             image_features = fusion_model(image_features)
-            image_features /= image_features.norm(dim=-1, keepdim=True)
-            text_features /= text_features.norm(dim=-1, keepdim=True)
-            similarity = (100.0 * image_features @ text_features.T)
-            similarity = similarity.view(b, num_text_aug, -1).softmax(dim=-1)
-            similarity = similarity.mean(dim=1, keepdim=False)
-            values_1, indices_1 = similarity.topk(1, dim=-1)
-            values_5, indices_5 = similarity.topk(5, dim=-1)
-            num += b
-            for i in range(b):
-                if indices_1[i] == class_id[i]:
-                    corr_1 += 1
-                if class_id[i] in indices_5[i]:
-                    corr_5 += 1
-    top1 = float(corr_1) / num * 100
-    top5 = float(corr_5) / num * 100
-    wandb.log({"top1": top1})
-    wandb.log({"top5": top5})
-    print('Epoch: [{}/{}]: Top1: {}, Top5: {}'.format(epoch, config.solver.epochs, top1, top5))
-    return top1
+
+            v = image_features / image_features.norm(dim=-1, keepdim=True)
+            logits = model.logit_scale.exp() * (v @ text_features.t())
+            probs = logits.sigmoid()
+            preds = (probs >= thresh_tensor).float()
+
+            all_targets.append(targets.cpu())
+            all_preds.append(preds.cpu())
+            all_probs.append(probs.cpu())
+            if severities is not None:
+                all_severities.append(severities.cpu())
+
+    targets_np = torch.cat(all_targets).numpy()
+    preds_np = torch.cat(all_preds).numpy()
+    probs_np = torch.cat(all_probs).numpy()
+    severities_np = torch.cat(all_severities).numpy() if len(all_severities) > 0 else None
+
+    per_class_f1 = []
+    for i in range(num_classes):
+        per_class_f1.append(f1_score(targets_np[:, i], preds_np[:, i], zero_division=0))
+    macro_f1 = float(np.mean(per_class_f1))
+
+    per_class_ap = []
+    for i in range(num_classes):
+        y_true = targets_np[:, i]
+        y_score = probs_np[:, i]
+        uniq = np.unique(y_true)
+        if uniq.size == 1:
+            per_class_ap.append(float(uniq[0]))
+            continue
+        ap_i = average_precision_score(y_true, y_score)
+        if np.isnan(ap_i):
+            ap_i = 0.0
+        per_class_ap.append(float(ap_i))
+    macro_ap = float(np.mean(per_class_ap))
+
+    # Severity-weighted F1 per class and overall (mean across classes).
+    severity_weighted = None
+    per_class_severity_f1 = None
+    if severities_np is not None:
+        severities_np = np.nan_to_num(severities_np, nan=0.0, posinf=0.0, neginf=0.0)
+        severities_np[severities_np < 0] = 0  # Guard against malformed labels
+        per_class_severity_f1 = []
+        for i in range(num_classes):
+            sev_levels = severities_np[:, i]
+            t_i = targets_np[:, i].astype(np.int32)
+            p_i = preds_np[:, i].astype(np.int32)
+            level_f1 = []
+            for lvl in range(num_severity_levels):
+                mask = sev_levels == lvl
+                n = int(mask.sum())
+                if n == 0:
+                    level_f1.append(0.0)
+                    continue
+
+                y_true = t_i[mask]
+                y_pred = p_i[mask]
+                level_f1.append(f1_score(y_true, y_pred, zero_division=0))
+
+            level_f1 = np.array(level_f1, dtype=np.float32)
+            per_class_severity_f1.append(float(np.dot(severity_weights, level_f1)))
+        severity_weighted = float(np.mean(per_class_severity_f1))
+
+    log_data = {"val_macro_f1": macro_f1}
+    for i, f1_val in enumerate(per_class_f1):
+        log_data[f"val_f1_class_{i}"] = f1_val
+    log_data["val_macro_ap"] = macro_ap
+    for i, ap_val in enumerate(per_class_ap):
+        log_data[f"val_ap_class_{i}"] = ap_val
+    if severity_weighted is not None:
+        log_data["val_severity_weighted_f1"] = severity_weighted
+        for i, sev_f1 in enumerate(per_class_severity_f1):
+            log_data[f"val_severity_weighted_f1_class_{i}"] = sev_f1
+    wandb.log(log_data)
+
+    print('Epoch: [{}/{}]: Macro F1: {:.2f} | Macro AP: {:.2f}'.format(epoch, config.solver.epochs, macro_f1, macro_ap))
+    return {
+        "macro_f1": macro_f1,
+        "per_class_f1": per_class_f1,
+        "macro_ap": macro_ap,
+        "per_class_ap": per_class_ap,
+        "severity_weighted_f1": severity_weighted,
+        "per_class_severity_weighted_f1": per_class_severity_f1,
+    }
 
 def main():
     global args, best_prec1
@@ -80,15 +181,54 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', '-cfg', default='')
     parser.add_argument('--log_time', default='')
+    parser.add_argument(
+        '--output_root',
+        default='./exp',
+        help='Root directory where checkpoints/config copies are saved',
+    )
+    parser.add_argument(
+        '--log_root',
+        default=None,
+        help='Directory to store wandb logs (defaults to wandb default when unset)',
+    )
+    parser.add_argument(
+        '--threshold',
+        type=float,
+        default=0.5,
+        help='Decision threshold for sigmoid probabilities when computing F1',
+    )
+    parser.add_argument('--fold', type=int, default=None, help='Fold index for cross-validation (e.g., 0-4)')
+    parser.add_argument('--split', choices=['val', 'test'], default='val', help='Which split list to use')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
         config = yaml.load(f)
-    working_dir = os.path.join('./exp', config['network']['type'], config['network']['arch'], config['data']['dataset'],
-                               args.log_time)
-    wandb.init(project=config['network']['type'],
-               name='{}_{}_{}_{}'.format(args.log_time, config['network']['type'], config['network']['arch'],
-                                         config['data']['dataset']))
+    config = DotMap(config)
+
+    if args.fold is not None:
+        dataset_name = getattr(config.data, "dataset", "mby140")
+        if args.split == "val":
+            config.data.val_list = f'lists/{dataset_name}/fold{args.fold}/mb_val.txt'
+        else:
+            config.data.val_list = f'lists/{dataset_name}/fold{args.fold}/mb_test.txt'
+        config.data.dataset = dataset_name
+
+    working_dir = os.path.join(
+        args.output_root,
+        config['network']['type'],
+        config['network']['arch'],
+        f"{config['data']['dataset']}_fold{args.fold}" if args.fold is not None else config['data']['dataset'],
+        args.log_time,
+    )
+
+    if args.log_root is not None:
+        Path(args.log_root).mkdir(parents=True, exist_ok=True)
+
+    wandb.init(
+        project=config['network']['type'],
+        name='{}_{}_{}_{}'.format(args.log_time, config['network']['type'], config['network']['arch'], config['data']['dataset']),
+        dir=args.log_root,
+    )
     print('-' * 80)
     print(' ' * 20, "working dir: {}".format(working_dir))
     print('-' * 80)
@@ -98,8 +238,6 @@ def main():
     pp = pprint.PrettyPrinter(indent=4)
     pp.pprint(config)
     print('-' * 80)
-
-    config = DotMap(config)
 
     Path(working_dir).mkdir(parents=True, exist_ok=True)
     shutil.copy(args.config, working_dir)
@@ -126,7 +264,7 @@ def main():
 
     val_data = Action_DATASETS(config.data.val_list, config.data.label_list, num_segments=config.data.num_segments,
                         image_tmpl=config.data.image_tmpl,
-                        transform=transform_val, random_shift=config.random_shift)
+                        transform=transform_val, random_shift=False, include_severity=True)
     val_loader = DataLoader(val_data, batch_size=config.data.batch_size, num_workers=config.data.workers, shuffle=False,
                             pin_memory=True, drop_last=True)
 
@@ -151,9 +289,25 @@ def main():
             print(("=> no checkpoint found at '{}'".format(config.pretrain)))
 
     classes, num_text_aug, text_dict = text_prompt(val_data)
+    with torch.no_grad():
+        text_inputs = classes.to(device)
+        raw_text_features = model_text(text_inputs)
+        text_features = raw_text_features.view(num_text_aug, -1, raw_text_features.size(-1)).mean(dim=0)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
     best_prec1 = 0.0
-    prec1 = validate(start_epoch, val_loader, classes, device, model, fusion_model, config, num_text_aug)
+    metrics = validate(
+        start_epoch,
+        val_loader,
+        classes,
+        device,
+        model,
+        fusion_model,
+        config,
+        num_text_aug,
+        text_features,
+        threshold=args.threshold,
+    )
 
 if __name__ == '__main__':
     main()

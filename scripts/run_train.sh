@@ -10,6 +10,17 @@ type=$(python -c "import yaml;print(yaml.load(open('${config}'))['network']['typ
 arch=$(python -c "import yaml;print(yaml.load(open('${config}'))['network']['arch'])")
 dataset=$(python -c "import yaml;print(yaml.load(open('${config}'))['data']['dataset'])")
 now=$(date +"%Y%m%d_%H%M%S")
-mkdir -p exp/${type}/${arch}/${dataset}/${now}
-python -u train.py  --config ${config} --log_time $now 2>&1|tee exp/${type}/${arch}/${dataset}/${now}/$now.log
+output_root=${OUTPUT_ROOT:-exp}
+log_root=${LOG_ROOT:-}
+
+mkdir -p "${output_root}/${type}/${arch}/${dataset}/${now}"
+if [ -n "${log_root}" ]; then
+  mkdir -p "${log_root}"
+  log_root_flag=(--log_root "${log_root}")
+else
+  log_root_flag=()
+fi
+
+python -u train.py --config ${config} --log_time $now --output_root "${output_root}" "${log_root_flag[@]}" \
+  2>&1 | tee "${output_root}/${type}/${arch}/${dataset}/${now}/$now.log"
 # --mail-user=mengmengwang@zju.edu.cn --mail-type=ALL -x node86 

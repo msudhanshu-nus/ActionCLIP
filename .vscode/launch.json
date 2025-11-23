@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Run test.py (fold0 test)",
+        "type": "python",
+        "request": "launch",
+        "program": "${workspaceFolder}/test.py",
+        "python": "/home/mishra/miniconda3/envs/actionclip/bin/python",
+        "console": "integratedTerminal",
+        "cwd": "${workspaceFolder}",
+        "args": [
+          "-cfg", "configs/mby140/mby140_test.yaml",
+          "--log_time", "fold0_test",
+          "--fold", "0",
+          "--split", "test"
+        ],
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}"
+        }
+      }
+    ]
+  }
