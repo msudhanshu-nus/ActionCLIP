@@ -10,3 +10,5 @@ thumb.sdb
 .idea
 wandb/
 trained_models/
+checkpoints/
+pretrained_mby140/
