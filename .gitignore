@@ -12,3 +12,9 @@ wandb/
 trained_models/
 checkpoints/
 pretrained_mby140/
+PR_curves/
+output/
+predictions/
+plovad_mby140_logs/
+log/
+exp/

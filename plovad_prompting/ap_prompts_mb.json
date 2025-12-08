@@ -1,0 +1,30 @@
+{
+    "bleeding": {
+        "Anomaly Type": "Bleeding is primarily a physical anomaly in laparoscopic bypass surgery, characterized by abnormal escape of blood from vessels or tissue surfaces, creating visual and hemodynamic deviations from the expected controlled operative field.",
+        "Visual Appearance": "Bright red liquid flowing over pale yellow fat and pink bowel, creating high-contrast warm red pools against a cool desaturated background.",
+        "Sudden Change": "Bleeding is marked by a sudden change in the scene, with rapid appearance or expansion of bright red or dark blood pools or streaks that were previously absent, often obscuring instruments, anatomy, or the target dissection plane within a few frames.",
+        "Impact": "Bleeding has a strong impact on the scene, as it can quickly flood the endoscopic view, force the surgeon to stop the planned step, apply suction, compression, or coagulation, and increase cognitive workload and risk of downstream complications.",
+        "Scene Conditions": "Bleeding is associated with dynamic scene conditions where visibility fluctuates due to blood spreading over the camera and tissues, suction clearing the field intermittently, and frequent repositioning of instruments and the endoscope to regain a safe view.",
+        "Motion": "Active pulsatile jets of blood or slow gravity-driven trickles expanding into a dark maroon pool that obscures the tissue texture.",
+        "Severity": "Rapidly expanding glossy red film accumulating in the cavity, requiring suction clearing to reveal the underlying anatomy."
+    },
+    "mechanical_injury": {
+        "Anomaly Type": "Mechanical injury is primarily a physical anomaly caused by unintended or excessive mechanical forces, such as tearing, crushing, or perforating tissues or organs with laparoscopic instruments beyond what is expected in safe manipulation.",
+        "Visual Appearance": "Linear serosal tear on the jejunal loop exposing pink muscle layers with ragged edges and shredded yellow fat, without any thermal charring.",
+        "Sudden Change": "Mechanical injury is characterized by a sudden structural change, such as abrupt tissue tearing, unintended organ displacement, or perforation that was not planned, often occurring immediately following a forceful grasp, traction, or instrument collision.",
+        "Impact": "Mechanical injury impacts the scene by creating new defects or gaps in tissue planes, potentially exposing underlying structures, provoking secondary bleeding, and forcing the surgeon to halt progression, reassess anatomy, and initiate repair strategies.",
+        "Scene Conditions": "Mechanical injury is associated with scene conditions where traction becomes excessive, counter-traction is suboptimal, or instrument angles are unfavorable, often with sudden changes in tension or contact pressure leading to visible structural damage.",
+        "Anatomy": "Round punched-out perforation in the gastric pouch wall showing a dark lumen, caused by needle overshoot or instrument levering.",
+        "Key Negative Indicator": "Clean tissue laceration or capsule retraction on the liver dome with bleeding but notably absent of white smoke or black burn marks."
+    },
+    "thermal_injury": {
+        "Anomaly Type": "Thermal injury is primarily a physical anomaly caused by unintended or excessive energy delivery from devices such as monopolar hooks, bipolar forceps, or ultrasonic shears, resulting in overheating, charring, or necrosis of tissues beyond the intended target.",
+        "Visual Appearance": "White blanched patch on the purple jejunal wall turning into a yellow-gray coagulated strip with a central black charred eschar.",
+        "Sudden Change": "Thermal injury is characterized by a sudden change in tissue appearance when energy is activated, including rapid color shift to white, yellow, or black, smoke generation, and loss of normal texture or elasticity within a few frames.",
+        "Impact": "Thermal injury impacts the scene by damaging critical structures, obscuring landmarks with smoke or char, increasing the risk of delayed perforation or leaks, and forcing unexpected pause, irrigation, or change of strategy to protect adjacent organs.",
+        "Scene Conditions": "Thermal injury is associated with scene conditions such as prolonged activation time, repeated firing in a confined space, inadequate irrigation, or energy delivery too close to vulnerable structures, often accompanied by transient fogging or smoke that reduces clarity.",
+        "Byproducts": "Active release of white surgical smoke plume and haziness obstructing the field of view, originating from the energy device tip.",
+        "Interaction": "Ultrasonic shears or hook cautery contact causing bubbling in pink fluid and rising steam, leaving a pale coagulated tissue edge.",
+        "Progression": "Progression from superficial tissue whitening to deep black carbonization surrounded by a pale opaque thermal halo on the fat."
+    }
+}
