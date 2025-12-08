@@ -240,21 +240,29 @@ class CLIP(nn.Module):
     def encode_image(self, image):
         return self.visual(image.type(self.dtype))
 
-    def encode_text(self, text):
-        x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
+    def encode_token(self, token):
+        # x = self.token_embedding(token)
+        return self.token_embedding(token).type(self.dtype)
+
+    def encode_text(self, text, token_ids=None):
+        """
+            If token_ids is None: text is token IDs (standard path).
+            If token_ids is provided: text is prebuilt embeddings; token_ids are the IDs used to locate EOT.
+        """
+        if token_ids is None:
+            token_ids = text
+            x = self.token_embedding(token_ids).type(self.dtype)
+        else:
+            x = text.type(self.dtype)
 
         x = x + self.positional_embedding.type(self.dtype)
         if self.emb_dropout > 0:
             x = self.dropout(x)
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute(1, 0, 2)
         x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = x.permute(1, 0, 2)
         x = self.ln_final(x).type(self.dtype)
-
-        # x.shape = [batch_size, n_ctx, transformer.width]
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
-
+        x = x[torch.arange(x.shape[0]), token_ids.argmax(dim=-1)] @ self.text_projection
         return x
 
     def forward(self, image, text):

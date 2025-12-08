@@ -131,7 +131,7 @@ class Action_DATASETS(data.Dataset):
     def __init__(self, list_file, labels_file,
                  num_segments=1, new_length=1,
                  image_tmpl='img_{:08d}.jpg', transform=None,
-                 random_shift=True, test_mode=False, index_bias=1, include_severity=False):
+                 random_shift=True, test_mode=False, index_bias=1, include_severity=False, include_path=False):
 
         self.list_file = list_file
         self.num_segments = num_segments
@@ -144,6 +144,7 @@ class Action_DATASETS(data.Dataset):
         self.index_bias = index_bias
         self.labels_file = labels_file
         self.include_severity = include_severity
+        self.include_path = include_path
         self.frame_cache = {}  # directory -> sorted list of frame filenames
 
         if self.index_bias is None:
@@ -255,7 +256,11 @@ class Action_DATASETS(data.Dataset):
         target = torch.from_numpy(record.label)
         if self.include_severity:
             severity = torch.from_numpy(record.severity)
+            if self.include_path:
+                return process_data, target, severity, record.path
             return process_data, target, severity
+        if self.include_path:
+            return process_data, target, record.path
         return process_data, target
 
     def __len__(self):

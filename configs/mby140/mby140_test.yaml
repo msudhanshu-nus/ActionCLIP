@@ -1,5 +1,6 @@
-# pretrain: /mnt/iMVR/sudhanshu/Projects/ActionCLIP/exp/clip_k400/ViT-B/16/mby140_fold2/fold2/model_best.pt
-pretrain: /mnt/iMVR/sudhanshu/Projects/ActionCLIP/pretrained_mby140/clip_k400/ViT-B/16/mby140_fold0/fold0/model_best.pt
+# pretrain: '/mnt/iMVR/sudhanshu/Projects/ActionCLIP/output/plovad_mby140/asl/clip_k400/ViT-B/16/mby140_fold{fold}/fold{fold}/model_best.pt'
+# Example after formatting: '/mnt/iMVR/sudhanshu/Projects/ActionCLIP/output/plovad_mby140/asl/clip_k400/ViT-B/16/mby140_fold0/fold0/model_best.pt'
+pretrain: '/mnt/iMVR/sudhanshu/Projects/ActionCLIP/output/plovad/bce/clip_k400/ViT-B/16/mby140_fold1/fold/model_best.pt'
 seed: 1024
 data:
     dataset: mby140
@@ -17,6 +18,12 @@ data:
     index_bias: 1
     input_size: 224
     random_shift: False
+    prompt_source: ''
+    prompt_mix_alpha: 0.5
+    prompt_prefix: 8
+    prompt_postfix: 8
+    prompt_std_init: 0.02
+    thresholds: [0.5, 0.5, 0.5]  # [bleeding, mechanical_injury, thermal_injury]
 network:
     arch: ViT-B/16  #ViT-B/32 ViT-B/16
     init: True

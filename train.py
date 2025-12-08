@@ -25,6 +25,9 @@ from utils.solver import _optimizer, _lr_scheduler
 from utils.tools import *
 from utils.Text_Prompt import *
 from utils.saving import  *
+from utils.losses import FocalLossMultiLabel, AsymmetricLossMultiLabel  # import custom focal and asymmetric losses
+from plovad_prompting.ap_embeddings import load_plovad_text_features
+from utils.learnable_prompts_plovad import *
 
 class TextCLIP(nn.Module):
     def __init__(self, model) :
@@ -60,6 +63,7 @@ def main():
         help='Directory to store wandb logs (defaults to wandb default when unset)',
     )
     parser.add_argument('--fold', type=int, default=None, help='Fold index for cross-validation (e.g., 0-4)')
+    parser.add_argument('--loss_type', choices=['bce', 'focal', 'asl'], default='bce', help='Select loss: weighted BCE, focal, or asymmetric loss')  # choose loss function
     args = parser.parse_args()
     with open(args.config, 'r') as f:
         config = yaml.load(f)
@@ -104,6 +108,17 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu" # If using GPU then use mixed precision training.
 
     model, clip_state_dict = clip.load(config.network.arch,device=device,jit=False, tsm=config.network.tsm, T=config.data.num_segments,dropout=config.network.drop_out, emb_dropout=config.network.emb_dropout,pretrain=config.network.init, joint = config.network.joint) #Must set jit=False for training  ViT-B/32
+
+    prompt_source = getattr(config.data, "prompt_source", "")
+    use_learnable = prompt_source in ("plovad_learnable", "plovad_both")
+
+    prompt_encoder = PlovadLearnablePrompt(
+          model,
+          prefix=getattr(config.data, "prompt_prefix", 2),
+          postfix=getattr(config.data, "prompt_postfix", 2),
+          std_init=getattr(config.data, "prompt_std_init", 0.02),
+      ).to(device) if use_learnable else None
+
 
     transform_train = get_augmentation(True,config)
     transform_val = get_augmentation(False,config)
@@ -162,30 +177,107 @@ def main():
             del checkpoint
         else:
             print(("=> no checkpoint found at '{}'".format(config.pretrain)))
+    classes, num_text_aug = None, 1
 
-    classes, num_text_aug, text_dict = text_prompt(train_data)
+    # classes, num_text_aug, text_dict = text_prompt(train_data)]
+    if prompt_source == "plovad":
+        text_features = load_plovad_text_features(
+            config.data.label_list,
+            "plovad_prompting/ap_prompts_mb.npy",
+            device,
+        )
+        num_classes = text_features.size(0)
+        classes, num_text_aug = None, 1  # placeholders; text_features is final
+    elif prompt_source == "plovad_learnable":
+        class_names = [c for _, c in train_data.classes]
+        num_classes = len(class_names)
+        ap_features = None
+        text_features = None  # computed per batch
+    elif prompt_source == 'plovad_both':
+        ap_features = load_plovad_text_features(config.data.label_list, "plovad_prompting/ap_prompts_mb.npy", device)
+        ap_features = ap_features / ap_features.norm(dim=-1, keepdim=True)  # ensure normed
+        class_names = [c for _, c in train_data.classes]  # use val_data in test.py
+        num_classes = ap_features.size(0)
+        text_features = None
+        class_names = [c for _, c in train_data.classes]
+    else:
+        classes, num_text_aug, text_dict = text_prompt(train_data)
+        with torch.no_grad():
+            text_inputs = classes.to(device)
+            raw = model_text(text_inputs)
+            text_features = raw.view(num_text_aug, -1, raw.size(-1)).mean(0)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        num_classes = text_features.size(0)
 
     # Pre-compute averaged text embeddings per class across prompt augmentations.
-    with torch.no_grad():
-        text_inputs = classes.to(device)  # [num_text_aug * num_classes, token_len]
-        raw_text_features = model_text(text_inputs)  # [num_text_aug * num_classes, D]
-        text_features = raw_text_features.view(num_text_aug, -1, raw_text_features.size(-1)).mean(dim=0)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)  # [num_classes, D]
+    # with torch.no_grad():
+    #     text_inputs = classes.to(device)  # [num_text_aug * num_classes, token_len]
+    #     raw_text_features = model_text(text_inputs)  # [num_text_aug * num_classes, D]
+    #     text_features = raw_text_features.view(num_text_aug, -1, raw_text_features.size(-1)).mean(dim=0)
+    #     text_features = text_features / text_features.norm(dim=-1, keepdim=True)  # [num_classes, D]
 
-    num_classes = text_features.shape[0]
-    loss_cfg = getattr(config, "loss", None)
-    if loss_cfg is not None and getattr(loss_cfg, "pos_weight", None) is not None:
-        pos_weight = torch.tensor(loss_cfg.pos_weight, device=device, dtype=text_features.dtype)
+    # num_classes = text_features.shape[0]  # number of action classes
+    loss_cfg = getattr(config, "loss", None)  # optional loss config from YAML
+    if loss_cfg is not None and getattr(loss_cfg, "pos_weight", None) is not None:  # check for user-defined pos weights
+        pos_weight = torch.tensor(loss_cfg.pos_weight, device=model.logit_scale.device, dtype=model.logit_scale.dtype)  # use provided pos weights
     else:
-        pos_weight = torch.ones(num_classes, device=device, dtype=text_features.dtype)
-    bce_loss = BCEWithLogitsLoss(pos_weight=pos_weight)
+        pos_weight = torch.ones(num_classes, device=model.logit_scale.device, dtype=model.logit_scale.dtype)  # default to uniform weights
 
-    optimizer = _optimizer(config, model, fusion_model)
+    default_alpha_values = torch.tensor([0.824, 0.970, 0.996], device=model.logit_scale.device, dtype=model.logit_scale.dtype)  # per-class alpha defaults for bleeding/mechanical/thermal
+    alpha_vec = torch.full((num_classes,), 0.5, device=model.logit_scale.device, dtype=model.logit_scale.dtype)  # start with 0.5 to balance pos/neg when alpha is not specified
+    copy_len = min(num_classes, default_alpha_values.numel())  # number of classes we have defaults for
+    alpha_vec[:copy_len] = default_alpha_values[:copy_len]  # copy provided alphas into the vector
+
+    loss_type = args.loss_type  # read desired loss from CLI
+    if loss_type == 'bce':  # weighted BCE branch
+        criterion = BCEWithLogitsLoss(pos_weight=pos_weight)  # instantiate BCE with optional pos_weight
+    elif loss_type == 'focal':  # focal loss branch
+        alpha_vec = torch.tensor([1.0, 1.2, 1.4]).to(device)
+        criterion = FocalLossMultiLabel(alpha=alpha_vec, gamma=1.0, reduction="mean")  # focal loss with gamma 2.0
+    elif loss_type == 'asl':  # asymmetric loss branch
+        alpha_vec = torch.tensor([1.0, 1.2, 1.4]).to(device)
+        criterion = AsymmetricLossMultiLabel(alpha=alpha_vec, gamma_pos=0.0, gamma_neg=0.5, clip=0.00, eps=1e-8, reduction="mean")  # ASL with specified hyperparameters
+    else:
+        raise ValueError(f"Unsupported loss_type: {loss_type}")  # guard for invalid loss choices
+
+    # optimizer = _optimizer(config, model, fusion_model)
+    if prompt_encoder is not None:
+            extra_params = list(prompt_encoder.parameters())
+    else:
+        extra_params = []
+
+    optimizer = _optimizer(config, model, fusion_model, extra_params=extra_params)
     lr_scheduler = _lr_scheduler(config, optimizer)
 
     best_prec1 = 0.0
     if config.solver.evaluate:
-        validate(start_epoch,val_loader, classes, device, model,fusion_model, config,num_text_aug, text_features)
+        tf_eval = text_features
+        ap_features_eval = None
+        dp_features_eval = None
+        if prompt_source in ("plovad_learnable", "plovad_both"):
+            with torch.no_grad():
+                dp_features_eval = prompt_encoder(class_names)
+                dp_features_eval = dp_features_eval / dp_features_eval.norm(dim=-1, keepdim=True)
+            if prompt_source == "plovad_both":
+                ap_features_eval = ap_features / ap_features.norm(dim=-1, keepdim=True)
+                tf_eval = None
+            else:
+                tf_eval = dp_features_eval
+
+        validate(
+            start_epoch,
+            val_loader,
+            classes,
+            device,
+            model,
+            fusion_model,
+            config,
+            num_text_aug,
+            text_features=tf_eval,
+            prompt_source=prompt_source,
+            ap_features=ap_features_eval,
+            dp_features=dp_features_eval if prompt_source == "plovad_both" else None,
+        )
         return
 
     for k,v in model.named_parameters():
@@ -212,11 +304,31 @@ def main():
             image_embedding = image_embedding.view(b,t,-1)
             image_embedding = fusion_model(image_embedding)
 
-            logit_scale = model.logit_scale.exp()
             v = image_embedding / image_embedding.norm(dim=-1, keepdim=True)
-            logits = logit_scale * (v @ text_features.t())  # [B, num_classes]
+            logit_scale = model.logit_scale.exp()
 
-            loss = bce_loss(logits, targets)
+            if prompt_source == "plovad_both":
+                dp_features = prompt_encoder(class_names)
+                dp_features = dp_features / dp_features.norm(dim=-1, keepdim=True)
+                ap_features_norm = ap_features / ap_features.norm(dim=-1, keepdim=True)
+
+                logits_dp = logit_scale * (v @ dp_features.to(v.dtype).t())
+                logits_ap = logit_scale * (v @ ap_features_norm.to(v.dtype).t())
+
+                loss_dp = criterion(logits_dp, targets)
+                loss_ap = criterion(logits_ap, targets)
+                loss = 0.5 * (loss_dp + loss_ap)
+            else:
+                if prompt_source == "plovad_learnable":
+                    dp_features = prompt_encoder(class_names)
+                    text_features_batch = dp_features / dp_features.norm(dim=-1, keepdim=True)
+                else:
+                    text_features_batch = text_features  # precomputed AP or vanilla
+
+                text_features_batch = text_features_batch.to(image_embedding.dtype)
+                logits = logit_scale * (v @ text_features_batch.t())  # [B, num_classes]
+
+                loss = criterion(logits, targets)  # compute selected loss (BCE, focal, or ASL)
             wandb.log({"train_loss": loss})
             wandb.log({"lr": optimizer.param_groups[0]['lr']})
             loss.backward()
@@ -230,7 +342,33 @@ def main():
 
         metrics = None
         if epoch % config.logging.eval_freq == 0:  # and epoch>0
-            metrics = validate(epoch,val_loader, classes, device, model,fusion_model, config,num_text_aug, text_features)
+            ap_features_val = None
+            dp_features_val = None
+            if prompt_source in ("plovad_learnable", "plovad_both"):
+                with torch.no_grad():
+                    dp_features_val = prompt_encoder(class_names)
+                    dp_features_val = dp_features_val / dp_features_val.norm(dim=-1, keepdim=True)
+                if prompt_source == "plovad_both":
+                    ap_features_val = ap_features / ap_features.norm(dim=-1, keepdim=True)
+                    tf_val = None
+                else:
+                    tf_val = dp_features_val
+            else:
+                tf_val = text_features
+            metrics = validate(
+                epoch,
+                val_loader,
+                classes,
+                device,
+                model,
+                fusion_model,
+                config,
+                num_text_aug,
+                text_features=tf_val,
+                prompt_source=prompt_source,
+                ap_features=ap_features_val,
+                dp_features=dp_features_val if prompt_source == "plovad_both" else None,
+            )
             prec1 = metrics["macro_f1"]
             ap = metrics["macro_ap"]
 

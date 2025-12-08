@@ -19,8 +19,13 @@ data:
         N: 2 #2
         M: 9  #9
     random_shift: True
+    prompt_source: 'plovad_both' # or plovad_learnable or plovad_both
+    prompt_mix_alpha: 0.5
+    prompt_prefix: 8
+    prompt_postfix: 8
+    prompt_std_init: 0.02
 loss:
-    pos_weight: [4.7, 32, 190]
+    pos_weight: [2.5, 4.0, 7.0]
 
 network:
     arch: ViT-B/16  #ViT-B/32 ViT-B/16

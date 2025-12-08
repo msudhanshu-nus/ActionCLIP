@@ -5,31 +5,83 @@
 import torch.optim as optim
 from utils.lr_scheduler import WarmupMultiStepLR, WarmupCosineAnnealingLR
 
-def _optimizer(config, model, fusion_model):
+
+def _optimizer(config, model, fusion_model, extra_params=None):
+    """Build optimizer with optional extra parameter groups (e.g., prompts)."""
+    extra_params = list(extra_params) if extra_params else []
+
+    def _dedup(params, taken):
+        # Keep parameter order but drop references that were already added.
+        filtered = []
+        for p in params:
+            if id(p) in taken:
+                continue
+            taken.add(id(p))
+            filtered.append(p)
+        return filtered
+
+    taken = set()
+
     if config.solver.optim == 'adam':
-        optimizer = optim.Adam([{'params': model.parameters()},  
-         {'params': fusion_model.parameters(), 'lr': config.solver.lr * config.solver.f_ratio}],
-                               lr=config.solver.lr, betas=(0.9, 0.98), eps=1e-8,
-                               weight_decay=0.2)  # Params used from paper, the lr is smaller, more safe for fine tuning to new dataset
+        model_params = _dedup(model.parameters(), taken)
+        fusion_params = _dedup(fusion_model.parameters(), taken)
+        prompt_params = _dedup(extra_params, taken)
+        param_groups = [
+            {'params': model_params},
+            {'params': fusion_params, 'lr': config.solver.lr * config.solver.f_ratio},
+        ]
+        if prompt_params:
+            param_groups.append({'params': prompt_params})
+        optimizer = optim.Adam(
+            param_groups,
+            lr=config.solver.lr,
+            betas=(0.9, 0.98),
+            eps=1e-8,
+            weight_decay=0.2
+        )  # Params used from paper, the lr is smaller, more safe for fine tuning to new dataset
         print('Adam')
     elif config.solver.optim == 'sgd':
-
-        optimizer = optim.SGD([{'params': model.parameters()},  
-         {'params': fusion_model.parameters(), 'lr': config.solver.lr * config.solver.f_ratio}],
-                              config.solver.lr,
-                              momentum=config.solver.momentum,
-                              weight_decay=config.solver.weight_decay)
+        model_params = _dedup(model.parameters(), taken)
+        fusion_params = _dedup(fusion_model.parameters(), taken)
+        prompt_params = _dedup(extra_params, taken)
+        param_groups = [
+            {'params': model_params},
+            {'params': fusion_params, 'lr': config.solver.lr * config.solver.f_ratio},
+        ]
+        if prompt_params:
+            param_groups.append({'params': prompt_params})
+        optimizer = optim.SGD(
+            param_groups,
+            config.solver.lr,
+            momentum=config.solver.momentum,
+            weight_decay=config.solver.weight_decay
+        )
         print('SGD')
     elif config.solver.optim == 'adamw':
-        vision_params = list(map(id, model.visual.parameters()))
-        text_params = filter(lambda p: id(p) not in vision_params,
-                             model.parameters())
+        visual_params = list(model.visual.parameters())
+        visual_param_ids = {id(p) for p in visual_params}
+        text_params = [p for p in model.parameters() if id(p) not in visual_param_ids]
 
-        optimizer = optim.AdamW([{'params': text_params},
-                                 {'params': model.visual.parameters(), 'lr': config.solver.lr * config.solver.ratio},
-                                 {'params': fusion_model.parameters(), 'lr': config.solver.lr * config.solver.f_ratio}],
-                                betas=(0.9, 0.98), lr=config.solver.lr, eps=1e-8,
-                                weight_decay=config.solver.weight_decay)  # Params used from paper, the lr is smaller, more safe for fine tuning to new dataset
+        visual_params = _dedup(visual_params, taken)
+        text_params = _dedup(text_params, taken)
+        fusion_params = _dedup(fusion_model.parameters(), taken)
+        prompt_params = _dedup(extra_params, taken)
+
+        param_groups = [
+            {'params': text_params},
+            {'params': visual_params, 'lr': config.solver.lr * config.solver.ratio},
+            {'params': fusion_params, 'lr': config.solver.lr * config.solver.f_ratio},
+        ]
+        if prompt_params:
+            param_groups.append({'params': prompt_params})
+
+        optimizer = optim.AdamW(
+            param_groups,
+            betas=(0.9, 0.98),
+            lr=config.solver.lr,
+            eps=1e-8,
+            weight_decay=config.solver.weight_decay
+        )  # Params used from paper, the lr is smaller, more safe for fine tuning to new dataset
         for param_group in optimizer.param_groups:
             print(param_group['lr'])
         print('AdamW')
