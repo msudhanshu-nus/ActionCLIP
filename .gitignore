@@ -12,3 +12,6 @@ wandb/
 trained_models/
 checkpoints/
 pretrained_mby140/
+predictions/
+output/
+PR_curves/
