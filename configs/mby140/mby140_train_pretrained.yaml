@@ -11,7 +11,7 @@ data:
     num_classes: 3
     image_tmpl: 'img_{:08d}.jpg'
     train_list: 'lists/mby140/fold0/mb_train.txt'
-    val_list: 'lists/mby140/fold0/mb_val.txt' #
+    val_list: 'lists/mby140/fold0/mb_test.txt' #
     label_list: 'lists/mby140_labels.csv'
     index_bias: 1
     input_size: 224
@@ -20,7 +20,7 @@ data:
         M: 9  #9
     random_shift: True
 loss:
-    pos_weight: [4.7, 32, 190]
+    pos_weight: [2.5,9,15]
 
 network:
     arch: ViT-B/16  #ViT-B/32 ViT-B/16

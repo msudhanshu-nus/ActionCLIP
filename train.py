@@ -69,7 +69,7 @@ def main():
     if args.fold is not None:
         config.data.dataset = getattr(config.data, "dataset", "mby140")
         config.data.train_list = f'lists/{config.data.dataset}/fold{args.fold}/mb_train.txt'
-        config.data.val_list = f'lists/{config.data.dataset}/fold{args.fold}/mb_val.txt'
+        config.data.val_list = f'lists/{config.data.dataset}/fold{args.fold}/mb_test.txt'
 
     working_dir = os.path.join(
         args.output_root,
